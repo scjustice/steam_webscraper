@@ -13,6 +13,8 @@ class SteamGameItem(scrapy.Item):
     # name = scrapy.Field()
     tag_list = scrapy.Field()
     title = scrapy.Field()
+    price = scrapy.Field()
+    orig_price = scrapy.Field()
     description = scrapy.Field()
     percent_pos = scrapy.Field()
     total_reviews = scrapy.Field()
@@ -22,15 +24,24 @@ class SteamGameItem(scrapy.Item):
     early_access = scrapy.Field()
 
     def __str__(self):
-#        return 'title = {}'.format(self['title'])
-        return '''Title = {} : tags = {}
+#   Need to handle price and original price
+        ret_val = '''Title = {} : tags = {}
         % positive = {} Num of Reviews = {}
+        '''.format(self['title'], str(self['tag_list']),
+                   self['percent_pos'], self['total_reviews'])
+        if ('orig_price' in self.keys()):
+            ret_val += 'Original Price = {} Sale price = {}'\
+                    .format(self['orig_price'], self['price'])
+        else:
+            ret_val += 'Price = {}'.format(self['price'])
+        ret_val += '''
         Release Date = {}, Developer = {}, Publisher = {}
         Early Access = {}
         Description = {}
-        '''.format(self['title'], str(self['tag_list']), self['percent_pos'], self['total_reviews'],
-            self['release_date'], self['developer'], self['publisher'], str(self['early_access']),
+        '''.format(self['release_date'], self['developer'], self['publisher'], str(self['early_access']),
             self['description'])
+
+        return ret_val
 
 class SteamReviewItem(scrapy.Item):
     user = scrapy.Field()
