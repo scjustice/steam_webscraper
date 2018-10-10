@@ -1,35 +1,29 @@
 from scrapy import Spider, Request
-from steam.items import SteamGameItem
+from steam.items import SteamGameItem, SteamReviewItem
 from scrapy_splash import SplashRequest
 
-lua_script_reviews = '''
+error_urls = []
+lua_review_script = '''
 function main(splash, args)
-  splash.images_enabled = false
-  assert(splash:go(args.url))
-  assert(splash:wait(0.5))
-  local btn = splash:select('div[id=age_gate_btn_continue]')
-  if btn ~= nil then
-    btn:click()
-  end
-  end_page = splash:select('div[id=NoMoreContent][style="opacity: 1;"]')
-  count = 0
-  --ypos = 1000
-  local scroll_down = splash:jsfunc("window.scrollBy")
-  local get_body_height = splash:jsfunc(
-        "function() {return document.body.scrollHeight;}"
-    )
-
-  while (end_page == nil) do
-    --splash.scroll_position = {y=ypos}
-    scroll_down(0, get_body_height())
+  splash:go(args.url)
+  getTest = splash:jsfunc([[
+    function() {
+    return document.getElementsByClassName('apphub_NoMoreContent')[0].getAttribute('style')
+    }
+  ]])
+  scrollScreen = splash:jsfunc([[
+    function() {
+        window.scrollBy(0, 2*window.innerHeight)
+    }
+  ]])
+  while (getTest() == 'display: none') do
+    scrollScreen()      
     splash:wait(1)
-    end_page = splash:select('div[id=NoMoreContent][style="opacity: 1;"]')
-    count = count + 1
-  end
+  end   
   return splash:html()
 end'''
 
-lua_script_detail = '''
+lua_detail_script = '''
 function main(splash, args)
   splash.images_enabled = false
   assert(splash:go(args.url))
@@ -62,15 +56,14 @@ class SteamSpider(Spider):
         tag_list = []
         for row in tag_list_rows:
             tag_id = row.xpath('./@data-tagid').extract_first()
-#            tag_label = row.xpath('./text()').extract_first()
             tag_list.append(tag_id)
         print('*' * 50)
 
         browse_by_tag_urls = [(x, ('https://store.steampowered.com/search/?' +
-                                  'tags={}&category1=998&supportedlang=' +
-                                  'english').format(x))
+                                   'tags={}&category1=998&supportedlang=' +
+                                   'english').format(x))
                               for x in tag_list]
-        print('Length of tag urls = {}'.format(len(browse_by_tag_urls)))
+#        print('Length of tag urls = {}'.format(len(browse_by_tag_urls)))
 
         for tag_url in browse_by_tag_urls[0:2]:
             print('Browsing {}'.format(tag_url[1]))
@@ -87,12 +80,14 @@ class SteamSpider(Spider):
         last_page = int(response.xpath('//div[@class="search_pagination_' +
                                        'right"]/a/text()')[-2].extract())
 
-        genre_browse_url_list = ['https://store.steampowered.com/search/?' +
-                                 'tags={}&category1=998&page={}'
+        genre_browse_url_list = [('https://store.steampowered.com/search/?' +
+                                  'tags={}&category1=998&page={}&' +
+                                  'supportedlang=english')
                                  .format(tag_id, x)
                                  for x in range(1, last_page+1)]
 
         for url in genre_browse_url_list[0:1]:
+            print('Browsing {}'.format(url))
             yield Request(url=url, callback=self.parse_tag_browse_page)
 
     def parse_tag_browse_page(self, response):
@@ -116,28 +111,26 @@ class SteamSpider(Spider):
                         .extract_first()
             if price is None:
                 print('Game is on sale')
-#                print("Title = {}".format(title))
                 orig_price = game.xpath('.//div[@class="col search_price ' +
                                         'discounted responsive_secondrow"]' +
                                         '/span/strike/text()')\
                                  .extract_first().strip('$')
-#                print("Original price = {}".format(orig_price))
                 price = game.xpath('.//div[@class="col search_price ' +
                                    'discounted responsive_secondrow"]/text()')\
                             .extract()[1].strip().strip('$')
-#                print("Price = {}".format(price))
-#                print("Url = {}".format(detail_url))
                 print('Title = {}, original price = {}, price = {}'
                       .format(title, orig_price, price))
                 print('game id = {}, url = {}'.format(game_id, detail_url))
 
                 yield SplashRequest(url=detail_url,
-                                    args={'wait': 0.5, 'image': 0,
-                                          'lua_source': lua_script_detail},
+                                    args={'wait': 0.5, 'images': 0,
+                                          'lua_source': lua_detail_script,
+                                          'timeout': 90},
                                     endpoint='execute',
                                     callback=self.parse_game_detail,
                                     meta={'title': title, 'price': price,
-                                          'orig_price': orig_price})
+                                          'orig_price': orig_price,
+                                          'game_id': game_id})
 
             elif price.strip() == '':
                 continue
@@ -147,18 +140,18 @@ class SteamSpider(Spider):
                       (title, price, game_id, detail_url))
             print('*' * 50)
             yield SplashRequest(url=detail_url,
-                                args={'wait': 0.5, 'image': 0,
-                                      'lua_source': lua_script_detail},
+                                args={'wait': 0.5, 'images': 0, 'timeout': 90,
+                                      'lua_source': lua_detail_script},
                                 endpoint='execute',
                                 callback=self.parse_game_detail,
-                                meta={'title': title, 'price': price})
+                                meta={'title': title, 'price': price,
+                                      'game_id': game_id})
 
     def parse_game_detail(self, response):
         '''Browse the individual entries for a game
         '''
         import re
 
-        print('response = {}'.format(response))
         tag_list = list(map(lambda x: x.strip(), response.xpath(
             '//div[@class="glance_tags popular_tags"]/a/text()').extract()))
         description = response.xpath('//div[@class="game_description_snippet' +
@@ -204,9 +197,6 @@ class SteamSpider(Spider):
 #        try:
 #            percent_pos,total_reviews = re.search('(\d+)% of the (\d+,?\d+)', \
 #                response.xpath('//div[@class="user_reviews_summary_row"]/@data-tooltip-text').extract_first()).group(1,2) 
-#        except AttributeError:
-#            percent_pos = 'N/A'
-#            total_reviews = 0
         release_date = response.xpath('//div[@class="release_date"]/div[@class="date"]/text()').extract_first()
         developer = response.xpath('//div[@id="developers_list"]/a/text()').extract_first()        
         publisher = response.xpath('//div[@class="summary column"]/a/text()').extract_first()
@@ -214,6 +204,7 @@ class SteamSpider(Spider):
 
         game_item = SteamGameItem()
         game_item['title'] = response.meta['title']
+        game_item['game_id'] = response.meta['game_id']
         game_item['tag_list'] = tag_list
         game_item['price'] = response.meta['price']
         if 'orig_price' in response.meta.keys():
@@ -228,13 +219,77 @@ class SteamSpider(Spider):
 
         print(game_item)
 
-#        yield game_item
-#        review_url_list =
+        yield game_item
+#        review_url = ('https://steamcommunity.com/app/{}/reviews/' +
+#                      '?browsefilter=toprated&snr=1_5_reviews_')\
+#            .format(response.meta['game_id'])
+#        print(review_url)
+#        yield SplashRequest(url=review_url,
+#                            args={'wait': 0.5, 'images': 0, 'timeout': 3600,
+#                                  'lua_source': lua_review_script},
+#                            endpoint='execute',
+#                            callback=self.parse_game_review,
+#                            meta={'title': response.meta['title']})
 
-#   Yield an Item that contains info for the game then yield a url list of reviews
 
+# Yield an Item that contains info for the game
+# And then yield a request with the review url
 
+    def parse_game_review(self, response):
+        ''' Parse the reviews of a game after letting splash scroll through all
+           of the pages so that all reviews are loaded
+        '''
+        import re
 
-        
+        print('*' * 50)
+        print('Parsing the review for {}').format(response.meta['title'])
+        print('*' * 50)
 
+        review_pages = response.xpath('//div[starts-with(@id,"page")]' +
+                                      '[not(@class="apphub_CardRow")]')
 
+        for page in review_pages[0:1]:
+            review_rows = page.xpath('.//div[@class="apphub_Card ' +
+                                     'modalContentLink interactable"]')
+            for review in review_rows[0:1]:
+                found_helpful = review.xpath('.//div[@class="found_helpful"]' +
+                                             '/text()')
+                num_helpful = re.search('(.*) people', found_helpful[0]
+                                        .extract()).group(1).strip()
+                num_funny = re.search('(.*) people', found_helpful[1]
+                                      .extract()).group(1).strip()
+                recommend = review.xpath('.//div[@class="title"]/text()')\
+                                  .extract_first() == 'Recommended'
+                hours_played = re.search('(.*) hrs', review.xpath('.//div' +
+                                         '[@class="hours"]/text()')
+                                         .extract_first()).group(1)
+                date_posted = review.xpath('.//div[@class="date_posted"]' +
+                                           '/text()').extract_first()\
+                                                     .replace('Posted: ', '')
+                if ',' not in date_posted:
+                    date_posted += ', 2018'
+                review_list = review.xpath('.//div[@class="apphub_Card' +
+                                           'TextContent"]/text()')\
+                                    .extract()[1:]
+                review_text = '\n'.join(map(lambda x: x.strip(), review_list))
+                username = review.xpath('.//div[@class="apphub_CardContent' +
+                                        'AuthorName offline ellipsis"]' +
+                                        '/a/text()').extract_first()
+                products_owned = re.search('(.*) products', review.xpath(
+                                           './/div[@class="apphub_Card' +
+                                           'ContentMoreLink ellipsis"]' +
+                                           '/text()').extract_first())\
+                                   .group(1)
+
+                item = SteamReviewItem()
+                item['title'] = response.meta['title']
+                item['recommend'] = recommend
+                item['hours_played'] = hours_played
+                item['date_posted'] = date_posted
+                item['review_text'] = review_text
+                item['username'] = username
+                item['products_owned'] = products_owned
+                item['num_helpful'] = num_helpful
+                item['num_funny'] = num_funny
+
+                print(item)
