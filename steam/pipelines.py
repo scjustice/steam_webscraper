@@ -29,8 +29,8 @@ class SteamPipeline(object):
         print('Processing item: {}'.format(item['title']))
         if isinstance(item, SteamGameItem):
             exporter = self._exporter_for_item('game')
-            print('Item contains games')
+#            print('Item contains games')
         elif item is SteamReviewItem:
-            print('Item contains reviews')
+#            print('Item contains reviews')
             exporter = self._exporter_for_item('review')
         exporter.export_item(item)

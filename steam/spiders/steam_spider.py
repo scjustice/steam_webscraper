@@ -1,6 +1,8 @@
 from scrapy import Spider, Request
 from steam.items import SteamGameItem, SteamReviewItem
 from scrapy_splash import SplashRequest
+from twisted.internet.error import TimeoutError
+# import time
 
 error_urls = []
 lua_review_script = '''
@@ -17,17 +19,17 @@ function main(splash, args)
     }
   ]])
   while (getTest() == 'display: none') do
-    scrollScreen()      
+    scrollScreen()
     splash:wait(1)
-  end   
+  end
   return splash:html()
 end'''
 
 lua_detail_script = '''
 function main(splash, args)
-  splash.images_enabled = false
   assert(splash:go(args.url))
   assert(splash:wait(0.5))
+  splash.images_enabled = false
   check_for_age = splash:runjs([[
     if (document.getElementById("ageYear") != null) {
       btn = document.getElementsByClassName("btnv6_blue_hoverfade btn_medium")
@@ -35,16 +37,22 @@ function main(splash, args)
       btn[0].click()
     }
     ]])
-    splash:wait(2)
+    splash:wait(3)
   return splash:html()
 end
 '''
+
+debug_log = 'scrapy_debug.log'
 
 
 class SteamSpider(Spider):
     name = 'steam_spider'
     allowed_urls = ['https://store.steampowered.com']
-    start_urls = ['https://store.steampowered.com/tag/browse/#global_492']
+#    start_urls = ['https://store.steampowered.com/tag/browse/#global_492']
+    start_urls = ['https://store.steampowered.com/search/?category1=998' +
+                  '&supportedlang=english']
+    timeout_urls = 'timeout_urls.list'
+    cur_tag_index_pair = 0
 
     def parse(self, response):
         ''' Start by parsing the list of tags
@@ -52,33 +60,24 @@ class SteamSpider(Spider):
 
         '''
 
-        tag_list_rows = response.xpath('//div[@class="tag_browse_tag"]')
-        tag_list = []
-        for row in tag_list_rows:
-            tag_id = row.xpath('./@data-tagid').extract_first()
-            tag_list.append(tag_id)
-        print('*' * 50)
+        last_page = int(response.xpath('//div[@class="search_pagination_' +
+                                       'right"]/a/text()')[-2].extract())
+        browse_url_list = [('https://store.steampowered.com/search/?' +
+                            'sort_by=Released_DESC&category1=998&page={}&' +
+                            'supportedlang=english').format(x)
+                           for x in range(1, last_page+1)]
 
-        browse_by_tag_urls = [(x, ('https://store.steampowered.com/search/?' +
-                                   'tags={}&category1=998&supportedlang=' +
-                                   'english').format(x))
-                              for x in tag_list]
-#        print('Length of tag urls = {}'.format(len(browse_by_tag_urls)))
-
-        for tag_url in browse_by_tag_urls[0:2]:
-            print('Browsing {}'.format(tag_url[1]))
-            print('=' * 50)
-
-            yield Request(url=tag_url[1], meta={'tag_id': tag_url[0]},
-                          callback=self.parse_tag_browse_list)
-#           yield Request(url=url, callback=self.parse_tag_browse_list)
-#           should go to a page to list out the browse pages
+        for url in browse_url_list:
+            yield Request(url=url, callback=self.parse_browse_page)
 
     def parse_tag_browse_list(self, response):
 
         tag_id = response.meta['tag_id']
-        last_page = int(response.xpath('//div[@class="search_pagination_' +
-                                       'right"]/a/text()')[-2].extract())
+        try:
+            last_page = int(response.xpath('//div[@class="search_pagination_' +
+                                           'right"]/a/text()')[-2].extract())
+        except IndexError:
+            last_page = 1
 
         genre_browse_url_list = [('https://store.steampowered.com/search/?' +
                                   'tags={}&category1=998&page={}&' +
@@ -86,11 +85,10 @@ class SteamSpider(Spider):
                                  .format(tag_id, x)
                                  for x in range(1, last_page+1)]
 
-        for url in genre_browse_url_list[0:1]:
-            print('Browsing {}'.format(url))
+        for url in genre_browse_url_list:
             yield Request(url=url, callback=self.parse_tag_browse_page)
 
-    def parse_tag_browse_page(self, response):
+    def parse_browse_page(self, response):
         '''Browse an individual page that lists 25 games per page
 
         '''
@@ -98,19 +96,24 @@ class SteamSpider(Spider):
 
         game_list = response.xpath('//div[@id="search_result_container"]' +
                                    '/div[2]/a')
-        print('-' * 50)
 
         for game in game_list:
+            meta = {}
             detail_url = game.xpath('./@href').extract_first()
+            if detail_url.find('/sub/') > 0:
+                continue
             game_id = re.search('app/(\d+)/', detail_url).group(1)
             title = game.xpath('.//span[@class="title"]/text()')\
                         .extract_first()
+            if title == 'Dynomite Deluxe':
+                with open(debug_log, 'w+') as f:
+                    f.write(response.url)
 
             price = game.xpath('.//div[@class="col search_price  ' +
                                'responsive_secondrow"]/text()')\
                         .extract_first()
+            meta = {'title': title, 'game_id': game_id}
             if price is None:
-                print('Game is on sale')
                 orig_price = game.xpath('.//div[@class="col search_price ' +
                                         'discounted responsive_secondrow"]' +
                                         '/span/strike/text()')\
@@ -118,39 +121,41 @@ class SteamSpider(Spider):
                 price = game.xpath('.//div[@class="col search_price ' +
                                    'discounted responsive_secondrow"]/text()')\
                             .extract()[1].strip().strip('$')
-                print('Title = {}, original price = {}, price = {}'
-                      .format(title, orig_price, price))
-                print('game id = {}, url = {}'.format(game_id, detail_url))
-
-                yield SplashRequest(url=detail_url,
-                                    args={'wait': 0.5, 'images': 0,
-                                          'lua_source': lua_detail_script,
-                                          'timeout': 90},
-                                    endpoint='execute',
-                                    callback=self.parse_game_detail,
-                                    meta={'title': title, 'price': price,
-                                          'orig_price': orig_price,
-                                          'game_id': game_id})
-
+                meta['price'] = price
+                meta['orig_price'] = orig_price
             elif price.strip() == '':
                 continue
             else:
                 price = price.strip().strip('$')
-                print('Title = {}, price = {}, game id = {}, url = {}'.format
-                      (title, price, game_id, detail_url))
+                meta['price'] = price
+                meta['orig_price'] = float('nan')
             print('*' * 50)
-            yield SplashRequest(url=detail_url,
-                                args={'wait': 0.5, 'images': 0, 'timeout': 90,
-                                      'lua_source': lua_detail_script},
-                                endpoint='execute',
-                                callback=self.parse_game_detail,
-                                meta={'title': title, 'price': price,
-                                      'game_id': game_id})
+            yield Request(url=detail_url, callback=self.parse_game_detail,
+                          meta=meta)
 
     def parse_game_detail(self, response):
         '''Browse the individual entries for a game
         '''
         import re
+
+        if (response.url.find('agecheck') > 0):
+            print('*' * 50)
+            print('Age input needed for {}'.format(response.url))
+            return SplashRequest(url=response.url,
+                                 args={'wait': 0.5, 'images': 0, 'timeout': 90,
+                                       'lua_source': lua_detail_script},
+                                 endpoint='execute',
+                                 callback=self.parse_game_detail,
+                                 meta=response.meta)
+
+        release_date = response.xpath('//div[@class="release_date"]/div' +
+                                      '[@class="date"]/text()').extract_first()
+
+        prerelease_test = response.xpath('//div[@class="game_area_comingsoon' +
+                                         'game_area_bubble"]') != []
+#       Skip unreleased games
+        if release_date == '' or prerelease_test:
+            return
 
         tag_list = list(map(lambda x: x.strip(), response.xpath(
             '//div[@class="glance_tags popular_tags"]/a/text()').extract()))
@@ -163,9 +168,8 @@ class SteamSpider(Spider):
                                       .extract_first().strip()\
                                       .find('No user') >= 0
 
-        print('*' * 50)
+#       print('No reviews')
         if test_for_no_reviews:
-            print('No reviews')
             percent_pos = 'N/A'
             total_reviews = '0'
         else:
@@ -175,7 +179,6 @@ class SteamSpider(Spider):
                                      .extract_first().strip()
 #       Handle games with some reviews but not enough for percent_pos
             if review_summary.find('Need') >= 0:
-                print('Not enough reviews for a % positive')
                 percent_pos = 'N/A'
                 total_reviews = re.search('(\d+) user', response.xpath(
                                           '//span[@class="game_review_' +
@@ -183,53 +186,40 @@ class SteamSpider(Spider):
                                           '/text()')
                                           .extract_first()).group(1)
             else:
-#               Handle games with large number of reviews
-                print('Enough reviews for % positive')
+                # Handle games with large number of reviews
                 total_reviews = response.xpath('//div[@class="summary ' +
                                                'column"]/span[@class=' +
                                                '"responsive_hidden"]/text()')\
                     .extract()[-1].strip().strip('()').replace(',', '')
-                print('Total number of reviews = {}'.format(total_reviews))
                 percent_pos = re.search('(\d+)%', response.xpath(
                                         '//span[@class="nonresponsive_hidden' +
                                         ' responsive_reviewdesc"]/text()')
                                         .extract_first()).group(1)
-#        try:
-#            percent_pos,total_reviews = re.search('(\d+)% of the (\d+,?\d+)', \
-#                response.xpath('//div[@class="user_reviews_summary_row"]/@data-tooltip-text').extract_first()).group(1,2) 
-        release_date = response.xpath('//div[@class="release_date"]/div[@class="date"]/text()').extract_first()
-        developer = response.xpath('//div[@id="developers_list"]/a/text()').extract_first()        
-        publisher = response.xpath('//div[@class="summary column"]/a/text()').extract_first()
-        early_access = response.xpath('//div[@class="early_access_header"]') == []
+        developer = response.xpath('//div[@id="developers_list"]/a/text()')\
+                            .extract_first()
+        publisher = response.xpath('//div[@class="summary column"]/a/text()')\
+                            .extract_first()
+        early_access = response.xpath('//div[@class="early_access_header"' +
+                                      ']') != []
 
         game_item = SteamGameItem()
         game_item['title'] = response.meta['title']
         game_item['game_id'] = response.meta['game_id']
         game_item['tag_list'] = tag_list
         game_item['price'] = response.meta['price']
-        if 'orig_price' in response.meta.keys():
-            game_item['orig_price'] = response.meta['orig_price']
+        game_item['orig_price'] = response.meta['orig_price']
         game_item['description'] = description
         game_item['percent_pos'] = percent_pos
         game_item['total_reviews'] = total_reviews
         game_item['release_date'] = release_date
-        game_item['developer'] = developer
-        game_item['publisher'] = publisher
+        game_item['developer'] = developer if developer is not None else 'N/A'
+        game_item['publisher'] = publisher if publisher is not None else 'N/A'
         game_item['early_access'] = early_access
 
-        print(game_item)
+#        print(game_item)
 
-        yield game_item
-#        review_url = ('https://steamcommunity.com/app/{}/reviews/' +
-#                      '?browsefilter=toprated&snr=1_5_reviews_')\
-#            .format(response.meta['game_id'])
-#        print(review_url)
-#        yield SplashRequest(url=review_url,
-#                            args={'wait': 0.5, 'images': 0, 'timeout': 3600,
-#                                  'lua_source': lua_review_script},
-#                            endpoint='execute',
-#                            callback=self.parse_game_review,
-#                            meta={'title': response.meta['title']})
+#        yield game_item
+        return game_item
 
 
 # Yield an Item that contains info for the game
@@ -293,3 +283,13 @@ class SteamSpider(Spider):
                 item['num_funny'] = num_funny
 
                 print(item)
+
+    def errback_steam(self, failure):
+        print("Error encountered")
+        self.logger.error(repr(failure))
+
+        if failure.check(TimeoutError):
+            request = failure.request
+            self.logger.error('TimeoutError on {}', request.url)
+            with open(self.timeout_urls, 'w+') as f:
+                f.write('Timed out: {}'.format(request.url))
