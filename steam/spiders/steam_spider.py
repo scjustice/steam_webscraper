@@ -1,16 +1,14 @@
 from scrapy import Spider, Request
 from steam.items import SteamGameItem, SteamReviewItem
 from scrapy_splash import SplashRequest
-from twisted.internet.error import TimeoutError
-# import time
 
-error_urls = []
 lua_review_script = '''
 function main(splash, args)
   splash:go(args.url)
   getTest = splash:jsfunc([[
     function() {
-    return document.getElementsByClassName('apphub_NoMoreContent')[0].getAttribute('style')
+    ret_val = document.getElementsByClassName('apphub_NoMoreContent')
+    return ret_val[0].getAttribute('style')
     }
   ]])
   scrollScreen = splash:jsfunc([[
@@ -42,78 +40,62 @@ function main(splash, args)
 end
 '''
 
-debug_log = 'scrapy_debug.log'
-
 
 class SteamSpider(Spider):
+    ''' Class statement for the steam spider that is crawls the steam website.
+    '''
+
     name = 'steam_spider'
     allowed_urls = ['https://store.steampowered.com']
-#    start_urls = ['https://store.steampowered.com/tag/browse/#global_492']
     start_urls = ['https://store.steampowered.com/search/?category1=998' +
                   '&supportedlang=english']
     timeout_urls = 'timeout_urls.list'
     cur_tag_index_pair = 0
 
     def parse(self, response):
-        ''' Start by parsing the list of tags
-
-
-        '''
-
+        # Start by parsing the initial search page.
+        # Find the number for the last page of the games
         last_page = int(response.xpath('//div[@class="search_pagination_' +
                                        'right"]/a/text()')[-2].extract())
+        # Use a list comprehension to generate all of the pages that will
+        # need to be scraped.
         browse_url_list = [('https://store.steampowered.com/search/?' +
                             'sort_by=Released_DESC&category1=998&page={}&' +
                             'supportedlang=english').format(x)
                            for x in range(1, last_page+1)]
-
+        # Yield a request for each page that contains a list of games
         for url in browse_url_list:
             yield Request(url=url, callback=self.parse_browse_page)
 
-    def parse_tag_browse_list(self, response):
-
-        tag_id = response.meta['tag_id']
-        try:
-            last_page = int(response.xpath('//div[@class="search_pagination_' +
-                                           'right"]/a/text()')[-2].extract())
-        except IndexError:
-            last_page = 1
-
-        genre_browse_url_list = [('https://store.steampowered.com/search/?' +
-                                  'tags={}&category1=998&page={}&' +
-                                  'supportedlang=english')
-                                 .format(tag_id, x)
-                                 for x in range(1, last_page+1)]
-
-        for url in genre_browse_url_list:
-            yield Request(url=url, callback=self.parse_tag_browse_page)
-
     def parse_browse_page(self, response):
-        '''Browse an individual page that lists 25 games per page
+        '''Browse an individual page that lists 25 games per page.
 
+            This page contains the title, price, sale price if on sale,
+            game_id, and url to the page that contains detail information.
         '''
+
         import re
 
         game_list = response.xpath('//div[@id="search_result_container"]' +
                                    '/div[2]/a')
-
         for game in game_list:
+            # meta variable that will be passed forward to detail page
             meta = {}
             detail_url = game.xpath('./@href').extract_first()
             if detail_url.find('/sub/') > 0:
+                # Skip entries that point to bundles since not tracking them.
                 continue
             game_id = re.search('app/(\d+)/', detail_url).group(1)
             title = game.xpath('.//span[@class="title"]/text()')\
                         .extract_first()
-            if title == 'Dynomite Deluxe':
-                with open(debug_log, 'w+') as f:
-                    f.write(response.url)
 
             price = game.xpath('.//div[@class="col search_price  ' +
                                'responsive_secondrow"]/text()')\
                         .extract_first()
             meta = {'title': title, 'game_id': game_id}
+            # if the price entry is empty that means game is on sale
             if price is None:
+                # Parse the original price as well as the new sale price
                 orig_price = game.xpath('.//div[@class="col search_price ' +
                                         'discounted responsive_secondrow"]' +
                                         '/span/strike/text()')\
@@ -124,23 +106,40 @@ class SteamSpider(Spider):
                 meta['price'] = price
                 meta['orig_price'] = orig_price
             elif price.strip() == '':
+                # Skip games that are not yet available for purchase
                 continue
             else:
+                ''' Remove the dollar sign from price, but keep a string to
+                    but keep price as a string since want denote free to
+                    play games. '''
                 price = price.strip().strip('$')
                 meta['price'] = price
+                # Save original price as NaN for games that are not on sale.
                 meta['orig_price'] = float('nan')
-            print('*' * 50)
+            # Yield a request that leads to the detail page for each game.
+            # Also pass the meta variable containing price, title, and game_id.
             yield Request(url=detail_url, callback=self.parse_game_detail,
                           meta=meta)
 
     def parse_game_detail(self, response):
-        '''Browse the individual entries for a game
-        '''
+        '''Scrap the entries for an individual game.  '''
         import re
 
+        # Check that the url for the reponse isn't an age check page
         if (response.url.find('agecheck') > 0):
-            print('*' * 50)
             print('Age input needed for {}'.format(response.url))
+            ''' If age check is required for the game, then forward request
+                through scrapy-splash. Utilize the lua_detail_script already
+                defined.
+
+                Run splash with images = 0 to turn off image and reduce
+                rendering time.
+                Increase timeout to 90 seconds since some pages took longer
+                to load.
+                Endpoint = execute sets renderer to load the code defined in
+                lua_source to run before passing on the request
+                '''
+
             return SplashRequest(url=response.url,
                                  args={'wait': 0.5, 'images': 0, 'timeout': 90,
                                        'lua_source': lua_detail_script},
@@ -153,7 +152,7 @@ class SteamSpider(Spider):
 
         prerelease_test = response.xpath('//div[@class="game_area_comingsoon' +
                                          'game_area_bubble"]') != []
-#       Skip unreleased games
+        # Skip games without release date or only available for prepurchase.
         if release_date == '' or prerelease_test:
             return
 
@@ -162,13 +161,12 @@ class SteamSpider(Spider):
         description = response.xpath('//div[@class="game_description_snippet' +
                                      '"]/text()')\
                               .extract_first().lstrip().rstrip()
-#       Handle games with no reviews
         test_for_no_reviews = response.xpath('//div[@class="summary column"]' +
                                              '/text()')\
                                       .extract_first().strip()\
                                       .find('No user') >= 0
 
-#       print('No reviews')
+        # Handle games with no reviews
         if test_for_no_reviews:
             percent_pos = 'N/A'
             total_reviews = '0'
@@ -177,7 +175,7 @@ class SteamSpider(Spider):
                                             'hidden responsive_reviewdesc"' +
                                             ']/text()')\
                                      .extract_first().strip()
-#       Handle games with some reviews but not enough for percent_pos
+            # Handle games with reviews but not enough for percent positive.
             if review_summary.find('Need') >= 0:
                 percent_pos = 'N/A'
                 total_reviews = re.search('(\d+) user', response.xpath(
@@ -185,8 +183,8 @@ class SteamSpider(Spider):
                                           'summary not_enough_reviews"]' +
                                           '/text()')
                                           .extract_first()).group(1)
+            # Handle games with large number of reviews
             else:
-                # Handle games with large number of reviews
                 total_reviews = response.xpath('//div[@class="summary ' +
                                                'column"]/span[@class=' +
                                                '"responsive_hidden"]/text()')\
@@ -199,9 +197,11 @@ class SteamSpider(Spider):
                             .extract_first()
         publisher = response.xpath('//div[@class="summary column"]/a/text()')\
                             .extract_first()
+        # Set a boolean for games under the early access program.
         early_access = response.xpath('//div[@class="early_access_header"' +
                                       ']') != []
 
+        # Create a new game item and store the scraped data from current game.
         game_item = SteamGameItem()
         game_item['title'] = response.meta['title']
         game_item['game_id'] = response.meta['game_id']
@@ -216,24 +216,17 @@ class SteamSpider(Spider):
         game_item['publisher'] = publisher if publisher is not None else 'N/A'
         game_item['early_access'] = early_access
 
-#        print(game_item)
-
-#        yield game_item
         return game_item
-
-
-# Yield an Item that contains info for the game
-# And then yield a request with the review url
 
     def parse_game_review(self, response):
         ''' Parse the reviews of a game after letting splash scroll through all
-           of the pages so that all reviews are loaded
+            of the pages so that all reviews are loaded.
+
+            This function is not used by the scraper because reviews are
+            not saved alongside the game data.
+
         '''
         import re
-
-        print('*' * 50)
-        print('Parsing the review for {}').format(response.meta['title'])
-        print('*' * 50)
 
         review_pages = response.xpath('//div[starts-with(@id,"page")]' +
                                       '[not(@class="apphub_CardRow")]')
@@ -256,6 +249,7 @@ class SteamSpider(Spider):
                 date_posted = review.xpath('.//div[@class="date_posted"]' +
                                            '/text()').extract_first()\
                                                      .replace('Posted: ', '')
+                # Add the year to reviews that were made this year
                 if ',' not in date_posted:
                     date_posted += ', 2018'
                 review_list = review.xpath('.//div[@class="apphub_Card' +
@@ -271,6 +265,7 @@ class SteamSpider(Spider):
                                            '/text()').extract_first())\
                                    .group(1)
 
+                # Create a review item to hold the scraped data from reviews.
                 item = SteamReviewItem()
                 item['title'] = response.meta['title']
                 item['recommend'] = recommend
@@ -283,13 +278,3 @@ class SteamSpider(Spider):
                 item['num_funny'] = num_funny
 
                 print(item)
-
-    def errback_steam(self, failure):
-        print("Error encountered")
-        self.logger.error(repr(failure))
-
-        if failure.check(TimeoutError):
-            request = failure.request
-            self.logger.error('TimeoutError on {}', request.url)
-            with open(self.timeout_urls, 'w+') as f:
-                f.write('Timed out: {}'.format(request.url))

@@ -9,8 +9,8 @@ import scrapy
 
 
 class SteamGameItem(scrapy.Item):
-    # define the fields for your item here like:
-    # name = scrapy.Field()
+    ''' Class for holding the data scraped from each individual game. '''
+
     tag_list = scrapy.Field()
     title = scrapy.Field()
     game_id = scrapy.Field()
@@ -25,7 +25,9 @@ class SteamGameItem(scrapy.Item):
     early_access = scrapy.Field()
 
     def __str__(self):
-#       Need to handle price and original price
+        ''' Function to generate a string for printing contents of game item.
+        '''
+
         ret_val = '''Title = {} : game_id = {} : tags = {}
         % positive = {} Num of Reviews = {}
         '''.format(self['title'], self['game_id'], str(self['tag_list']),
@@ -41,11 +43,14 @@ class SteamGameItem(scrapy.Item):
         Description = {}
         '''.format(self['release_date'], self['developer'], self['publisher'],
                    str(self['early_access']), self['description'])
-
         return ret_val
 
 
 class SteamReviewItem(scrapy.Item):
+    ''' Class for storing the data scraped from game reviews.
+        Currently not used by scraper
+    '''
+
     title = scrapy.Field()
     recommend = scrapy.Field()
     hours_played = scrapy.Field()
@@ -57,6 +62,8 @@ class SteamReviewItem(scrapy.Item):
     num_funny = scrapy.Field()
 
     def __str__(self):
+        ''' Function to generate a string for printing contents of review item.
+        '''
         review_sum = ' '.join(self['review_text'].split()[0:10])
         ret_val = '''
         Title = {}
