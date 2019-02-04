@@ -1,6 +1,7 @@
-# steam_webscraper
-Project for webscraper by Sean Justice.
-Implements a webscraper to gather data about the games available on the steam platform.
+# Webscraping the Steam Game Platform
 
-Webscraping the Steam Game Platform
-https://nycdatascience.com/blog/student-works/webscraping-the-steam-game-platform/
+## Objective
+To scrape data associated with all of the games available for purchase through the Steam platform and to use this data to gain insights on the growth of the platform as well as the popularity of types of games.
+
+Further details:
+[Webscraping the Steam Game Platform] (https://nycdatascience.com/blog/student-works/webscraping-the-steam-game-platform/)
